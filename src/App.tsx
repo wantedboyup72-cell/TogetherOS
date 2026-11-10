@@ -1123,6 +1123,7 @@ function AuthScreen() {
           email: email.trim(),
           password,
           options: {
+            emailRedirectTo: window.location.origin,
             data: { display_name: name.trim() },
           },
         })
