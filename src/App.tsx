@@ -1100,7 +1100,7 @@ function WorkspaceApp({ userId, userEmail, userName, onSignOut }: WorkspaceAppPr
 
 }
 
-type AuthMode = 'login' | 'signup'
+type AuthMode = 'login' | 'signup' | 'forgot'
 
 function AuthScreen() {
   const [mode, setMode] = useState<AuthMode>('login')
@@ -1111,14 +1111,25 @@ function AuthScreen() {
   const [message, setMessage] = useState('')
   const [errorMessage, setErrorMessage] = useState('')
 
+  const clearMessages = () => {
+    setMessage('')
+    setErrorMessage('')
+  }
+
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     setBusy(true)
-    setMessage('')
-    setErrorMessage('')
+    clearMessages()
 
     try {
-      if (mode === 'signup') {
+      if (mode === 'forgot') {
+        const { error } = await supabase.auth.resetPasswordForEmail(
+          email.trim(),
+          { redirectTo: window.location.origin }
+        )
+        if (error) throw error
+        setMessage('If an account exists for this email, a password reset link will be sent.')
+      } else if (mode === 'signup') {
         const { data, error } = await supabase.auth.signUp({
           email: email.trim(),
           password,
@@ -1127,25 +1138,46 @@ function AuthScreen() {
             data: { display_name: name.trim() },
           },
         })
-
         if (error) throw error
-
-        if (!data.session) {
-          setMessage('Account created. Please check your email to confirm your account, then log in.')
-        } else {
-          setMessage('Account created successfully.')
-        }
+        setMessage(
+          !data.session
+            ? 'Account created. Please check your email to confirm your account.'
+            : 'Account created successfully.'
+        )
       } else {
         const { error } = await supabase.auth.signInWithPassword({
           email: email.trim(),
           password,
         })
-
         if (error) throw error
       }
     } catch (error) {
       setErrorMessage(
         error instanceof Error ? error.message : 'Something went wrong. Please try again.'
+      )
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleResend = async () => {
+    clearMessages()
+    if (!email.trim()) {
+      setErrorMessage('Enter your email address first.')
+      return
+    }
+    setBusy(true)
+    try {
+      const { error } = await supabase.auth.resend({
+        type: 'signup',
+        email: email.trim(),
+        options: { emailRedirectTo: window.location.origin },
+      })
+      if (error) throw error
+      setMessage('If your account needs confirmation, a new confirmation email has been requested.')
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error ? error.message : 'Could not resend confirmation email.'
       )
     } finally {
       setBusy(false)
@@ -1162,24 +1194,29 @@ function AuthScreen() {
 
         <div className="auth-heading">
           <span className="auth-eyebrow">YOUR TEAM'S SHARED SPACE</span>
-          <h1>{mode === 'login' ? 'Welcome back.' : 'Bring your team together.'}</h1>
+          <h1>
+            {mode === 'login' ? 'Welcome back.' :
+             mode === 'signup' ? 'Bring your team together.' : 'Reset your password.'}
+          </h1>
           <p>
-            {mode === 'login'
-              ? 'Sign in to continue where your team left off.'
-              : 'Create your account and start organising work together.'}
+            {mode === 'login' ? 'Sign in to continue where your team left off.' :
+             mode === 'signup' ? 'Create your account and start organising work together.' :
+             'Enter your account email and we will send a reset link.'}
           </p>
         </div>
 
-        <div className="auth-tabs">
-          <button type="button" className={mode === 'login' ? 'selected' : ''}
-            onClick={() => { setMode('login'); setMessage(''); setErrorMessage('') }}>
-            Log in
-          </button>
-          <button type="button" className={mode === 'signup' ? 'selected' : ''}
-            onClick={() => { setMode('signup'); setMessage(''); setErrorMessage('') }}>
-            Create account
-          </button>
-        </div>
+        {mode !== 'forgot' && (
+          <div className="auth-tabs">
+            <button type="button" className={mode === 'login' ? 'selected' : ''}
+              onClick={() => { setMode('login'); clearMessages() }}>
+              Log in
+            </button>
+            <button type="button" className={mode === 'signup' ? 'selected' : ''}
+              onClick={() => { setMode('signup'); clearMessages() }}>
+              Create account
+            </button>
+          </div>
+        )}
 
         <form className="auth-form" onSubmit={handleSubmit}>
           {mode === 'signup' && (
@@ -1198,23 +1235,46 @@ function AuthScreen() {
               placeholder="you@example.com" />
           </label>
 
-          <label>
-            Password
-            <input required type="password"
-              minLength={8}
-              autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
-              value={password} onChange={event => setPassword(event.target.value)}
-              placeholder="At least 8 characters" />
-          </label>
+          {mode !== 'forgot' && (
+            <label>
+              Password
+              <input required type="password" minLength={8}
+                autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
+                value={password} onChange={event => setPassword(event.target.value)}
+                placeholder="At least 8 characters" />
+            </label>
+          )}
 
           {errorMessage && <p className="auth-message auth-error" role="alert">{errorMessage}</p>}
           {message && <p className="auth-message auth-success" role="status">{message}</p>}
 
           <button className="auth-submit" type="submit" disabled={busy}>
-            {busy ? 'Please wait...' : mode === 'login' ? 'Sign in to TogetherOS' : 'Create your account'}
+            {busy ? 'Please wait...' :
+             mode === 'login' ? 'Sign in to TogetherOS' :
+             mode === 'signup' ? 'Create your account' : 'Send reset link'}
             {!busy && <span>→</span>}
           </button>
         </form>
+
+        {mode === 'login' && (
+          <div className="auth-extra-actions">
+            <button type="button" className="auth-link"
+              onClick={() => { setMode('forgot'); clearMessages() }}>
+              Forgot password?
+            </button>
+            <button type="button" className="auth-link" disabled={busy}
+              onClick={handleResend}>
+              Resend confirmation email
+            </button>
+          </div>
+        )}
+
+        {mode === 'forgot' && (
+          <button type="button" className="auth-link auth-back-link"
+            onClick={() => { setMode('login'); clearMessages() }}>
+            ← Back to login
+          </button>
+        )}
 
         <p className="auth-footer">
           By continuing, you agree to use TogetherOS responsibly with your team.
@@ -1226,16 +1286,80 @@ function AuthScreen() {
   )
 }
 
+function ResetPasswordScreen({ onDone }: { onDone: () => void }) {
+  const [password, setPassword] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState('')
+  const [errorMessage, setErrorMessage] = useState('')
+
+  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    setBusy(true)
+    setMessage('')
+    setErrorMessage('')
+    try {
+      const { error } = await supabase.auth.updateUser({ password })
+      if (error) throw error
+      setMessage('Password updated successfully. You can now log in with your new password.')
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : 'Could not update password.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <main className="auth-screen">
+      <section className="auth-card">
+        <div className="auth-brand">
+          <span className="auth-brand-mark">t</span>
+          <span>together<span className="auth-brand-light">os</span></span>
+        </div>
+        <div className="auth-heading">
+          <span className="auth-eyebrow">ACCOUNT SECURITY</span>
+          <h1>Choose a new password.</h1>
+          <p>Enter a new password with at least 8 characters.</p>
+        </div>
+        {message ? (
+          <>
+            <p className="auth-message auth-success" role="status">{message}</p>
+            <button className="auth-submit" type="button" onClick={onDone}>
+              Continue to login <span>→</span>
+            </button>
+          </>
+        ) : (
+          <form className="auth-form" onSubmit={handleSubmit}>
+            <label>
+              New password
+              <input required type="password" minLength={8}
+                autoComplete="new-password" value={password}
+                onChange={event => setPassword(event.target.value)}
+                placeholder="At least 8 characters" />
+            </label>
+            {errorMessage && <p className="auth-message auth-error" role="alert">{errorMessage}</p>}
+            <button className="auth-submit" type="submit" disabled={busy}>
+              {busy ? 'Updating...' : 'Update password'}
+              {!busy && <span>→</span>}
+            </button>
+          </form>
+        )}
+      </section>
+    </main>
+  )
+}
+
 function App() {
   const [session, setSession] = useState<Session | null>(null)
   const [authLoading, setAuthLoading] = useState(true)
+  const [passwordRecovery, setPasswordRecovery] = useState(false)
 
   useEffect(() => {
     let mounted = true
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      (_event, nextSession) => {
+      (event, nextSession) => {
         if (!mounted) return
+        if (event === 'PASSWORD_RECOVERY') setPasswordRecovery(true)
         setSession(nextSession)
         setAuthLoading(false)
       }
@@ -1268,6 +1392,15 @@ function App() {
         <div className="auth-loading-mark">t</div>
         <span>Preparing your workspace...</span>
       </main>
+    )
+  }
+
+  if (passwordRecovery && session) {
+    return (
+      <ResetPasswordScreen onDone={async () => {
+        setPasswordRecovery(false)
+        await supabase.auth.signOut()
+      }} />
     )
   }
 
