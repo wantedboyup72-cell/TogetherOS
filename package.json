@@ -40,6 +40,7 @@
     "files": [
       "dist/**/*",
       "electron/main.cjs",
+      "electron/preload.cjs",
       "package.json"
     ],
     "win": {
@@ -51,7 +52,8 @@
           ]
         }
       ],
-      "artifactName": "TogetherOS-Setup-${version}.${ext}"
+      "artifactName": "TogetherOS-Setup-${version}.${ext}",
+      "icon": "build/icon.ico"
     },
     "nsis": {
       "oneClick": false,
@@ -60,6 +62,14 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "TogetherOS"
-    }
+    },
+    "protocols": [
+      {
+        "name": "TogetherOS Authentication",
+        "schemes": [
+          "togetheros"
+        ]
+      }
+    ]
   }
 }

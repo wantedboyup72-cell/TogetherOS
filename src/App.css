@@ -2810,3 +2810,20 @@ button:not(:disabled):active {
   display: block;
   margin: 18px auto 0;
 }
+
+/* TogetherOS task reminder control */
+.app-modal .reminder-toggle {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 9px;
+  margin-top: 2px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.app-modal .reminder-toggle input {
+  width: 16px;
+  min-height: 16px;
+  margin: 0;
+  accent-color: var(--violet);
+}

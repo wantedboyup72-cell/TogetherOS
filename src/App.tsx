@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import type { Session } from '@supabase/supabase-js'
 import { supabase } from './lib/supabase'
@@ -13,6 +13,8 @@ type Task = {
   completed: boolean
   priority: 'Low' | 'Medium' | 'High'
   assignee?: string
+  time?: string
+  reminderMinutes?: number
 }
 
 type Workspace = {
@@ -102,7 +104,9 @@ function isTask(value: unknown): value is Task {
     /^\d{4}-\d{2}-\d{2}$/.test(value.date) &&
     typeof value.completed === 'boolean' &&
     ['Low', 'Medium', 'High'].includes(String(value.priority)) &&
-    (value.assignee === undefined || typeof value.assignee === 'string')
+    (value.assignee === undefined || typeof value.assignee === 'string') &&
+    (value.time === undefined || (typeof value.time === 'string' && /^\d{2}:\d{2}$/.test(value.time))) &&
+    (value.reminderMinutes === undefined || (typeof value.reminderMinutes === 'number' && Number.isFinite(value.reminderMinutes) && value.reminderMinutes >= 0))
 }
 
 function isWorkspace(value: unknown): value is Workspace {
@@ -230,6 +234,10 @@ function WorkspaceApp({ userId, userEmail, userName, onSignOut }: WorkspaceAppPr
   const [taskTitle, setTaskTitle] = useState('')
   const [taskProject, setTaskProject] = useState('')
   const [taskDate, setTaskDate] = useState(currentDateKey)
+  const [taskTime, setTaskTime] = useState('09:00')
+  const [taskReminder, setTaskReminder] = useState(false)
+  const reminderAudioRef = useRef<AudioContext | null>(null)
+  const firedRemindersRef = useRef<Set<number>>(new Set())
   const [taskPriority, setTaskPriority] = useState<Task['priority']>('Medium')
   const [workspaceName, setWorkspaceName] = useState('')
   const [workspaceCategory, setWorkspaceCategory] = useState('General')
@@ -354,11 +362,68 @@ function WorkspaceApp({ userId, userEmail, userName, onSignOut }: WorkspaceAppPr
     ].slice(0, 30))
   }
 
+  useEffect(() => {
+    const checkReminders = () => {
+      const now = Date.now()
+
+      for (const task of tasks) {
+        if (task.completed || !task.time || task.reminderMinutes === undefined) continue
+        if (firedRemindersRef.current.has(task.id)) continue
+
+        const dueAt = new Date(`${task.date}T${task.time}:00`).getTime()
+        if (!Number.isFinite(dueAt)) continue
+
+        const reminderAt = dueAt - task.reminderMinutes * 60 * 1000
+        if (now > dueAt) {
+          firedRemindersRef.current.add(task.id)
+          continue
+        }
+        if (now < reminderAt) continue
+
+        firedRemindersRef.current.add(task.id)
+
+        if ('Notification' in window && Notification.permission === 'granted') {
+          try {
+            new Notification('TogetherOS reminder', {
+              body: `${task.title} is due in ${task.reminderMinutes} minutes.`,
+              tag: `togetheros-task-${task.id}`,
+            })
+          } catch (error) {
+            console.warn('TogetherOS notification could not be shown:', error)
+          }
+        }
+
+        try {
+          const audio = reminderAudioRef.current
+          if (audio && audio.state === 'running') {
+            const oscillator = audio.createOscillator()
+            const gain = audio.createGain()
+            oscillator.type = 'sine'
+            oscillator.frequency.value = 880
+            gain.gain.value = 0.12
+            oscillator.connect(gain)
+            gain.connect(audio.destination)
+            oscillator.start()
+            oscillator.stop(audio.currentTime + 0.35)
+          }
+        } catch (error) {
+          console.warn('TogetherOS reminder sound could not play:', error)
+        }
+      }
+    }
+
+    checkReminders()
+    const interval = window.setInterval(checkReminders, 15000)
+    return () => window.clearInterval(interval)
+  }, [tasks])
+
   const openNewTask = () => {
     setEditingTask(null)
     setTaskTitle('')
     setTaskProject(workspaces[0]?.name ?? '')
     setTaskDate(currentDateKey)
+    setTaskTime('09:00')
+    setTaskReminder(false)
     setTaskPriority('Medium')
     setTaskAssignee('')
     setShowTaskForm(true)
@@ -369,6 +434,8 @@ function WorkspaceApp({ userId, userEmail, userName, onSignOut }: WorkspaceAppPr
     setTaskTitle(task.title)
     setTaskProject(task.project)
     setTaskDate(task.date)
+    setTaskTime(task.time ?? '09:00')
+    setTaskReminder(task.reminderMinutes !== undefined)
     setTaskPriority(task.priority)
     setTaskAssignee(task.assignee ?? '')
     setShowTaskForm(true)
@@ -377,6 +444,22 @@ function WorkspaceApp({ userId, userEmail, userName, onSignOut }: WorkspaceAppPr
   const saveTask = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     setFormFeedback(null)
+
+    if (taskReminder) {
+      try {
+        if (!reminderAudioRef.current && typeof window.AudioContext !== 'undefined') {
+          reminderAudioRef.current = new window.AudioContext()
+        }
+        if (reminderAudioRef.current?.state === 'suspended') {
+          void reminderAudioRef.current.resume()
+        }
+      } catch (error) {
+        console.warn('TogetherOS could not prepare reminder sound:', error)
+      }
+      if ('Notification' in window && Notification.permission === 'default') {
+        void Notification.requestPermission()
+      }
+    }
     if (!taskTitle.trim()) {
       setFormFeedback({ type: 'error', text: 'Please enter a task title.' })
       return
@@ -392,14 +475,16 @@ function WorkspaceApp({ userId, userEmail, userName, onSignOut }: WorkspaceAppPr
 
     if (editingTask) {
       setTasks(current => current.map(task => task.id === editingTask.id
-        ? { ...task, title: taskTitle.trim(), project: taskProject, date: taskDate, priority: taskPriority, assignee: taskAssignee.trim() }
+        ? { ...task, title: taskTitle.trim(), project: taskProject, date: taskDate, time: taskReminder ? taskTime : undefined, reminderMinutes: taskReminder ? 10 : undefined, priority: taskPriority, assignee: taskAssignee.trim() }
         : task))
       logActivity('Task updated', taskTitle.trim())
       setFormFeedback({ type: 'success', text: 'Task updated successfully.' })
     } else {
       setTasks(current => [...current, {
         id: Date.now(), title: taskTitle.trim(), project: taskProject,
-        date: taskDate, completed: false, priority: taskPriority, assignee: taskAssignee.trim(),
+        date: taskDate, time: taskReminder ? taskTime : undefined,
+        reminderMinutes: taskReminder ? 10 : undefined,
+        completed: false, priority: taskPriority, assignee: taskAssignee.trim(),
       }])
       logActivity('Task created', taskTitle.trim())
       setFormFeedback({ type: 'success', text: 'Task created successfully.' })
@@ -768,6 +853,8 @@ function WorkspaceApp({ userId, userEmail, userName, onSignOut }: WorkspaceAppPr
             </div>
             <button className="primary-button" onClick={() => {
               setTaskDate(selectedDate)
+              setTaskTime('09:00')
+              setTaskReminder(false)
               setEditingTask(null)
               setTaskTitle('')
               setTaskProject(workspaces[0]?.name ?? '')
@@ -1071,8 +1158,15 @@ function WorkspaceApp({ userId, userEmail, userName, onSignOut }: WorkspaceAppPr
               {teamMembers.filter(member => workspaces.find(workspace => workspace.name === taskProject)?.id === member.workspaceId).map(member => <option key={member.id} value={member.name} />)}
             </datalist>
           </label>
-          <div className="modal-fields"><label>Due date<input type="date" required value={taskDate} onChange={event => setTaskDate(event.target.value)} /></label>
-            <label>Priority<select value={taskPriority} onChange={event => setTaskPriority(event.target.value as Task['priority'])}><option>Low</option><option>Medium</option><option>High</option></select></label></div>
+          <div className="modal-fields">
+            <label>Due date<input type="date" required value={taskDate} onChange={event => setTaskDate(event.target.value)} /></label>
+            <label>Due time<input type="time" required={taskReminder} value={taskTime} onChange={event => setTaskTime(event.target.value)} /></label>
+            <label>Priority<select value={taskPriority} onChange={event => setTaskPriority(event.target.value as Task['priority'])}><option>Low</option><option>Medium</option><option>High</option></select></label>
+          </div>
+          <label className="reminder-toggle">
+            <input type="checkbox" checked={taskReminder} onChange={event => setTaskReminder(event.target.checked)} />
+            Remind me 10 minutes before
+          </label>
           <div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setShowTaskForm(false)}>Cancel</button><button className="primary-button" type="submit">{editingTask ? 'Save changes' : 'Create task'}</button></div>
         </form>
       </div>}
@@ -1100,6 +1194,14 @@ function WorkspaceApp({ userId, userEmail, userName, onSignOut }: WorkspaceAppPr
 
 }
 
+declare global {
+  interface Window {
+    togetherOS?: {
+      onAuthCallback: (callback: (url: string) => void) => () => void
+    }
+  }
+}
+
 type AuthMode = 'login' | 'signup' | 'forgot'
 
 function AuthScreen() {
@@ -1116,6 +1218,9 @@ function AuthScreen() {
     setErrorMessage('')
   }
 
+  const authRedirectUrl = () =>
+    window.togetherOS ? 'togetheros://auth/callback' : window.location.origin
+
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     setBusy(true)
@@ -1125,7 +1230,7 @@ function AuthScreen() {
       if (mode === 'forgot') {
         const { error } = await supabase.auth.resetPasswordForEmail(
           email.trim(),
-          { redirectTo: window.location.origin }
+          { redirectTo: authRedirectUrl() }
         )
         if (error) throw error
         setMessage('If an account exists for this email, a password reset link will be sent.')
@@ -1134,7 +1239,7 @@ function AuthScreen() {
           email: email.trim(),
           password,
           options: {
-            emailRedirectTo: window.location.origin,
+            emailRedirectTo: authRedirectUrl(),
             data: { display_name: name.trim() },
           },
         })
@@ -1171,7 +1276,7 @@ function AuthScreen() {
       const { error } = await supabase.auth.resend({
         type: 'signup',
         email: email.trim(),
-        options: { emailRedirectTo: window.location.origin },
+        options: { emailRedirectTo: authRedirectUrl() },
       })
       if (error) throw error
       setMessage('If your account needs confirmation, a new confirmation email has been requested.')
@@ -1352,6 +1457,30 @@ function App() {
   const [session, setSession] = useState<Session | null>(null)
   const [authLoading, setAuthLoading] = useState(true)
   const [passwordRecovery, setPasswordRecovery] = useState(false)
+
+  useEffect(() => {
+    const unsubscribe = window.togetherOS?.onAuthCallback((callbackUrl) => {
+      try {
+        const callback = new URL(callbackUrl)
+        const code = callback.searchParams.get('code')
+        const callbackError = callback.searchParams.get('error_description') || callback.searchParams.get('error')
+
+        if (callbackError) {
+          window.alert(`Email confirmation failed: ${callbackError}`)
+          return
+        }
+        if (code) {
+          void supabase.auth.exchangeCodeForSession(code).then(({ error }) => {
+            if (error) window.alert(`Could not complete email confirmation: ${error.message}`)
+          })
+        }
+      } catch (error) {
+        console.error('Invalid TogetherOS authentication callback:', error)
+      }
+    })
+
+    return () => unsubscribe?.()
+  }, [])
 
   useEffect(() => {
     let mounted = true
