@@ -35,7 +35,55 @@ jobs:
           test -n "$VITE_SUPABASE_URL" || (echo "Missing VITE_SUPABASE_URL secret" && exit 1)
           test -n "$VITE_SUPABASE_PUBLISHABLE_KEY" || (echo "Missing VITE_SUPABASE_PUBLISHABLE_KEY secret" && exit 1)
 
-      - name: Build and publish Windows installer
+      - name: Build and upload Windows installer
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          npm run build
+          npx electron-builder --win nsis --x64 --publish never
+
+          VERSION="$(node -p "require('./package.json').version")"
+          INSTALLER="release/KARYA-Setup-${VERSION}.exe"
+
+          test -f "$INSTALLER"
+          test -f "${INSTALLER}.blockmap"
+
+          node - "$INSTALLER" "$VERSION" <<'NODE'
+          const fs = require("fs");
+          const crypto = require("crypto");
+          const path = require("path");
+
+          const [installer, version] = process.argv.slice(2);
+          const buffer = fs.readFileSync(installer);
+          const name = path.basename(installer);
+          const sha512 = crypto.createHash("sha512").update(buffer).digest("base64");
+
+          const metadata = [
+            `version: ${version}`,
+            `files:`,
+            `  - url: ${name}`,
+            `    sha512: ${sha512}`,
+            `    size: ${buffer.length}`,
+            `path: ${name}`,
+            `sha512: ${sha512}`,
+            `releaseDate: '${new Date().toISOString()}'`,
+            ""
+          ].join("\n");
+
+          fs.writeFileSync("release/latest.yml", metadata);
+          NODE
+
+          gh release upload "v${VERSION}" \
+            "$INSTALLER" \
+            "${INSTALLER}.blockmap" \
+            "release/latest.yml" \
+            --clobber
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.VITE_SUPABASE_PUBLISHABLE_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
         run: |
           npm run build
           npx electron-builder --win nsis --x64 --publish always
