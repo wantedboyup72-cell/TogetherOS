@@ -4,6 +4,13 @@ import type { Session } from '@supabase/supabase-js'
 import { supabase } from './lib/supabase'
 import './App.css'
 
+type UpdaterStatus = {
+  state: 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'error'
+  message: string
+  version?: string
+  percent?: number
+}
+
 type Task = {
   id: number
   cloudId?: string
@@ -14,7 +21,7 @@ type Task = {
   priority: 'Low' | 'Medium' | 'High'
   assignee?: string
   time?: string
-  reminderMinutes?: number
+  reminderMinutes?: number | number[]
 }
 
 type Workspace = {
@@ -31,6 +38,16 @@ type Activity = {
   title: string
   detail: string
   time: string
+}
+
+type AppNotification = {
+  id: string
+  title: string
+  detail: string
+  createdAt: string
+  read: boolean
+  taskId?: number
+  kind: 'reminder' | 'system'
 }
 
 type TeamMember = {
@@ -78,16 +95,20 @@ function writeSaved(key: string, value: unknown): void {
 
 type TogetherOSBackup = {
   app: 'TogetherOS'
-  version: 1
+  version: 1 | 2
   createdAt: string
   data: {
     tasks: Task[]
+    deletedTasks?: Task[]
     workspaces: Workspace[]
     activities: Activity[]
     teamMembers: TeamMember[]
     profileName: string
     profileEmail: string
     darkMode: boolean
+    accentColor?: 'violet' | 'blue' | 'teal' | 'rose'
+    ambientMotion?: boolean
+    animationIntensity?: 'soft' | 'balanced' | 'vivid'
   }
 }
 
@@ -106,7 +127,9 @@ function isTask(value: unknown): value is Task {
     ['Low', 'Medium', 'High'].includes(String(value.priority)) &&
     (value.assignee === undefined || typeof value.assignee === 'string') &&
     (value.time === undefined || (typeof value.time === 'string' && /^\d{2}:\d{2}$/.test(value.time))) &&
-    (value.reminderMinutes === undefined || (typeof value.reminderMinutes === 'number' && Number.isFinite(value.reminderMinutes) && value.reminderMinutes >= 0))
+    (value.reminderMinutes === undefined ||
+      (typeof value.reminderMinutes === 'number' && Number.isFinite(value.reminderMinutes) && value.reminderMinutes >= 0) ||
+      (Array.isArray(value.reminderMinutes) && value.reminderMinutes.every(item => typeof item === 'number' && Number.isFinite(item) && item > 0 && item <= 43200)))
 }
 
 function isWorkspace(value: unknown): value is Workspace {
@@ -137,17 +160,28 @@ function isTeamMember(value: unknown): value is TeamMember {
 }
 
 function isTogetherOSBackup(value: unknown): value is TogetherOSBackup {
-  if (!isRecord(value) || value.app !== 'TogetherOS' || value.version !== 1) return false
+  if (!isRecord(value) || value.app !== 'TogetherOS' ||
+      (value.version !== 1 && value.version !== 2)) return false
   if (!isRecord(value.data)) return false
 
   const data = value.data
-  return Array.isArray(data.tasks) && data.tasks.every(isTask) &&
+  const baseValid =
+    Array.isArray(data.tasks) && data.tasks.every(isTask) &&
     Array.isArray(data.workspaces) && data.workspaces.every(isWorkspace) &&
     Array.isArray(data.activities) && data.activities.every(isActivity) &&
     Array.isArray(data.teamMembers) && data.teamMembers.every(isTeamMember) &&
     typeof data.profileName === 'string' &&
     typeof data.profileEmail === 'string' &&
     typeof data.darkMode === 'boolean'
+
+  if (!baseValid) return false
+  if (value.version === 1) return true
+
+  return Array.isArray(data.deletedTasks) &&
+    data.deletedTasks.every(isTask) &&
+    ['violet', 'blue', 'teal', 'rose'].includes(String(data.accentColor)) &&
+    typeof data.ambientMotion === 'boolean' &&
+    ['soft', 'balanced', 'vivid'].includes(String(data.animationIntensity))
 }
 
 type WorkspaceAppProps = {
@@ -163,12 +197,30 @@ function WorkspaceApp({ userId, userEmail, userName, onSignOut }: WorkspaceAppPr
   const [showProfileMenu, setShowProfileMenu] = useState(false)
   const [showWorkspaceMenu, setShowWorkspaceMenu] = useState(false)
   const [darkMode, setDarkMode] = useState(() => readSaved(storageKey('togetheros-theme'), false))
+  // TOGETHEROS APPEARANCE CUSTOMIZATION V1
+  const [accentColor, setAccentColor] = useState<'violet' | 'blue' | 'teal' | 'rose'>(
+    () => readSaved(storageKey('togetheros-accent'), 'violet')
+  )
+  const [ambientMotion, setAmbientMotion] = useState(
+    () => readSaved(storageKey('togetheros-ambient-motion'), true)
+  )
+  const [animationIntensity, setAnimationIntensity] = useState<'soft' | 'balanced' | 'vivid'>(
+    () => readSaved(storageKey('togetheros-animation-intensity'), 'soft')
+  )
+
   const [tasks, setTasks] = useState<Task[]>(() => readSaved(storageKey('togetheros-tasks'), starterTasks))
+  const [deletedTasks, setDeletedTasks] = useState<Task[]>(
+    () => readSaved(storageKey('togetheros-deleted-tasks'), [])
+  )
+  useEffect(() => writeSaved(storageKey('togetheros-deleted-tasks'), deletedTasks), [deletedTasks, storageKey])
   const [workspaces, setWorkspaces] = useState<Workspace[]>(() => readSaved(storageKey('togetheros-workspaces'), starterWorkspaces))
   const [activities, setActivities] = useState<Activity[]>(() => readSaved(storageKey('togetheros-activity'), [
     { id: 1, title: 'Workspace created', detail: 'Website Redesign was added', time: 'Getting started' },
     { id: 2, title: 'Task completed', detail: 'Prepare team presentation', time: 'Sample activity' },
   ]))
+  const [notifications, setNotifications] = useState<AppNotification[]>(
+    () => readSaved(storageKey('togetheros-notifications'), [])
+  )
   const [search, setSearch] = useState('')
   const [taskFilter, setTaskFilter] = useState<'All' | 'Pending' | 'Completed' | 'Overdue'>('All')
   const [showNotifications, setShowNotifications] = useState(false)
@@ -218,6 +270,13 @@ function WorkspaceApp({ userId, userEmail, userName, onSignOut }: WorkspaceAppPr
   const [profileName, setProfileName] = useState(() => readSaved(storageKey('togetheros-profile-name'), userName || 'Your profile'))
   const [profileEmail, setProfileEmail] = useState(() => readSaved(storageKey('togetheros-profile-email'), userEmail))
   const [backupMessage, setBackupMessage] = useState('')
+  const [updaterStatus, setUpdaterStatus] = useState<UpdaterStatus | null>(null)
+
+  useEffect(() => {
+    const updater = window.togetherOS?.updater
+    if (!updater) return
+    return updater.onStatus(setUpdaterStatus)
+  }, [])
   const [currentDateKey] = useState(() => getDateKey(new Date()))
   const [calendarMonth, setCalendarMonth] = useState(() => {
     const now = new Date()
@@ -236,8 +295,10 @@ function WorkspaceApp({ userId, userEmail, userName, onSignOut }: WorkspaceAppPr
   const [taskDate, setTaskDate] = useState(currentDateKey)
   const [taskTime, setTaskTime] = useState('09:00')
   const [taskReminder, setTaskReminder] = useState(false)
+  const [taskReminderMinutes, setTaskReminderMinutes] = useState<number[]>([10])
+  const [customReminderMinutes, setCustomReminderMinutes] = useState('60')
   const reminderAudioRef = useRef<AudioContext | null>(null)
-  const firedRemindersRef = useRef<Set<number>>(new Set())
+  const firedRemindersRef = useRef<Set<string>>(new Set())
   const [taskPriority, setTaskPriority] = useState<Task['priority']>('Medium')
   const [workspaceName, setWorkspaceName] = useState('')
   const [workspaceCategory, setWorkspaceCategory] = useState('General')
@@ -246,7 +307,12 @@ function WorkspaceApp({ userId, userEmail, userName, onSignOut }: WorkspaceAppPr
   useEffect(() => writeSaved(storageKey('togetheros-tasks'), tasks), [tasks, storageKey])
   useEffect(() => writeSaved(storageKey('togetheros-workspaces'), workspaces), [workspaces, storageKey])
   useEffect(() => writeSaved(storageKey('togetheros-activity'), activities), [activities, storageKey])
+  useEffect(() => writeSaved(storageKey('togetheros-notifications'), notifications), [notifications, storageKey])
   useEffect(() => writeSaved(storageKey('togetheros-theme'), darkMode), [darkMode, storageKey])
+  useEffect(() => writeSaved(storageKey('togetheros-accent'), accentColor), [accentColor, storageKey])
+  useEffect(() => writeSaved(storageKey('togetheros-ambient-motion'), ambientMotion), [ambientMotion, storageKey])
+  useEffect(() => writeSaved(storageKey('togetheros-animation-intensity'), animationIntensity), [animationIntensity, storageKey])
+
   useEffect(() => writeSaved(storageKey('togetheros-members'), teamMembers), [teamMembers, storageKey])
   useEffect(() => writeSaved(storageKey('togetheros-profile-name'), profileName), [profileName, storageKey])
   useEffect(() => writeSaved(storageKey('togetheros-profile-email'), profileEmail), [profileEmail, storageKey])
@@ -254,9 +320,12 @@ function WorkspaceApp({ userId, userEmail, userName, onSignOut }: WorkspaceAppPr
   const exportBackup = () => {
     const backup: TogetherOSBackup = {
       app: 'TogetherOS',
-      version: 1,
+      version: 2,
       createdAt: new Date().toISOString(),
-      data: { tasks, workspaces, activities, teamMembers, profileName, profileEmail, darkMode },
+      data: {
+        tasks, deletedTasks, workspaces, activities, teamMembers,
+        profileName, profileEmail, darkMode, accentColor, ambientMotion, animationIntensity,
+      },
     }
 
     try {
@@ -286,7 +355,7 @@ function WorkspaceApp({ userId, userEmail, userName, onSignOut }: WorkspaceAppPr
 
       const parsed: unknown = JSON.parse(await file.text())
       if (!isTogetherOSBackup(parsed)) {
-        throw new Error('This file is not a valid TogetherOS version 1 backup.')
+        throw new Error('This file is not a valid TogetherOS backup (version 1 or 2).')
       }
 
       const confirmed = window.confirm(
@@ -298,12 +367,16 @@ function WorkspaceApp({ userId, userEmail, userName, onSignOut }: WorkspaceAppPr
       }
 
       setTasks(parsed.data.tasks)
+      setDeletedTasks(parsed.data.deletedTasks ?? [])
       setWorkspaces(parsed.data.workspaces)
       setActivities(parsed.data.activities)
       setTeamMembers(parsed.data.teamMembers)
       setProfileName(parsed.data.profileName)
       setProfileEmail(parsed.data.profileEmail)
       setDarkMode(parsed.data.darkMode)
+      if (parsed.data.accentColor) setAccentColor(parsed.data.accentColor)
+      if (typeof parsed.data.ambientMotion === 'boolean') setAmbientMotion(parsed.data.ambientMotion)
+      if (parsed.data.animationIntensity) setAnimationIntensity(parsed.data.animationIntensity)
       setSelectedWorkspaceId(null)
       setActivePage('Overview')
       setBackupMessage('Backup restored successfully.')
@@ -340,6 +413,12 @@ function WorkspaceApp({ userId, userEmail, userName, onSignOut }: WorkspaceAppPr
   })
 
   const openTaskCount = tasks.length - completedTasks
+  const dueTodayCount = tasks.filter(task =>
+    !task.completed && task.date === currentDateKey
+  ).length
+  const upcomingTaskCount = tasks.filter(task =>
+    !task.completed && task.date > currentDateKey
+  ).length
 
   const visibleTasks = useMemo(() => {
     return tasks.filter(task => {
@@ -363,57 +442,104 @@ function WorkspaceApp({ userId, userEmail, userName, onSignOut }: WorkspaceAppPr
   }
 
   useEffect(() => {
+    const formatReminder = (minutes: number) => {
+      if (minutes < 60) return `${minutes} minute${minutes === 1 ? '' : 's'}`
+      if (minutes < 1440) {
+        const hours = minutes / 60
+        return `${hours} hour${hours === 1 ? '' : 's'}`
+      }
+      const days = minutes / 1440
+      return `${days} day${days === 1 ? '' : 's'}`
+    }
+
+    const playReminderSound = async () => {
+      try {
+        let audio = reminderAudioRef.current
+        if (!audio && typeof window.AudioContext !== 'undefined') {
+          audio = new window.AudioContext()
+          reminderAudioRef.current = audio
+        }
+        if (!audio) return
+        if (audio.state === 'suspended') await audio.resume()
+        if (audio.state !== 'running') return
+
+        const oscillator = audio.createOscillator()
+        const gain = audio.createGain()
+        oscillator.type = 'sine'
+        oscillator.frequency.setValueAtTime(880, audio.currentTime)
+        gain.gain.setValueAtTime(0.0001, audio.currentTime)
+        gain.gain.exponentialRampToValueAtTime(0.12, audio.currentTime + 0.03)
+        gain.gain.exponentialRampToValueAtTime(0.0001, audio.currentTime + 0.55)
+        oscillator.connect(gain)
+        gain.connect(audio.destination)
+        oscillator.start()
+        oscillator.stop(audio.currentTime + 0.6)
+      } catch (error) {
+        console.warn('TogetherOS reminder sound could not play:', error)
+      }
+    }
+
     const checkReminders = () => {
       const now = Date.now()
 
       for (const task of tasks) {
         if (task.completed || !task.time || task.reminderMinutes === undefined) continue
-        if (firedRemindersRef.current.has(task.id)) continue
 
         const dueAt = new Date(`${task.date}T${task.time}:00`).getTime()
         if (!Number.isFinite(dueAt)) continue
 
-        const reminderAt = dueAt - task.reminderMinutes * 60 * 1000
-        if (now > dueAt) {
-          firedRemindersRef.current.add(task.id)
-          continue
-        }
-        if (now < reminderAt) continue
+        const reminderValues = Array.isArray(task.reminderMinutes)
+          ? task.reminderMinutes
+          : [task.reminderMinutes]
 
-        firedRemindersRef.current.add(task.id)
+        for (const minutes of reminderValues) {
+          if (!Number.isFinite(minutes) || minutes <= 0) continue
 
-        if ('Notification' in window && Notification.permission === 'granted') {
-          try {
-            new Notification('TogetherOS reminder', {
-              body: `${task.title} is due in ${task.reminderMinutes} minutes.`,
-              tag: `togetheros-task-${task.id}`,
-            })
-          } catch (error) {
-            console.warn('TogetherOS notification could not be shown:', error)
+          const reminderKey = `${task.id}:${dueAt}:${minutes}`
+          if (firedRemindersRef.current.has(reminderKey)) continue
+
+          const reminderAt = dueAt - minutes * 60 * 1000
+          // Small recovery window: don't silently lose a reminder
+          // if the app wakes up shortly after its scheduled due time.
+          if (now > dueAt + 5 * 60 * 1000) {
+            firedRemindersRef.current.add(reminderKey)
+            continue
           }
-        }
+          if (now < reminderAt) continue
 
-        try {
-          const audio = reminderAudioRef.current
-          if (audio && audio.state === 'running') {
-            const oscillator = audio.createOscillator()
-            const gain = audio.createGain()
-            oscillator.type = 'sine'
-            oscillator.frequency.value = 880
-            gain.gain.value = 0.12
-            oscillator.connect(gain)
-            gain.connect(audio.destination)
-            oscillator.start()
-            oscillator.stop(audio.currentTime + 0.35)
+          firedRemindersRef.current.add(reminderKey)
+
+          const notificationId = `reminder:${reminderKey}`
+          setNotifications(current => current.some(item => item.id === notificationId)
+            ? current
+            : [{
+                id: notificationId,
+                title: 'Task reminder',
+                detail: `${task.title} is due in ${formatReminder(minutes)}.`,
+                createdAt: new Date().toISOString(),
+                read: false,
+                taskId: task.id,
+                kind: 'reminder' as const,
+              }, ...current].slice(0, 100))
+
+          if ('Notification' in window && Notification.permission === 'granted') {
+            try {
+              new Notification('TogetherOS reminder', {
+                body: `${task.title} is due in ${formatReminder(minutes)}.`,
+                tag: `togetheros-task-${task.id}-${minutes}`,
+              })
+            } catch (error) {
+              console.warn('TogetherOS notification could not be shown:', error)
+            }
           }
-        } catch (error) {
-          console.warn('TogetherOS reminder sound could not play:', error)
+
+          void playReminderSound()
         }
       }
     }
 
     checkReminders()
-    const interval = window.setInterval(checkReminders, 15000)
+    const interval = window.setInterval(checkReminders, 5000)
     return () => window.clearInterval(interval)
   }, [tasks])
 
@@ -424,6 +550,8 @@ function WorkspaceApp({ userId, userEmail, userName, onSignOut }: WorkspaceAppPr
     setTaskDate(currentDateKey)
     setTaskTime('09:00')
     setTaskReminder(false)
+    setTaskReminderMinutes([10])
+    setCustomReminderMinutes('60')
     setTaskPriority('Medium')
     setTaskAssignee('')
     setShowTaskForm(true)
@@ -436,6 +564,10 @@ function WorkspaceApp({ userId, userEmail, userName, onSignOut }: WorkspaceAppPr
     setTaskDate(task.date)
     setTaskTime(task.time ?? '09:00')
     setTaskReminder(task.reminderMinutes !== undefined)
+    setTaskReminderMinutes(task.reminderMinutes === undefined
+      ? [10]
+      : (Array.isArray(task.reminderMinutes) ? task.reminderMinutes : [task.reminderMinutes]))
+    setCustomReminderMinutes('60')
     setTaskPriority(task.priority)
     setTaskAssignee(task.assignee ?? '')
     setShowTaskForm(true)
@@ -446,18 +578,30 @@ function WorkspaceApp({ userId, userEmail, userName, onSignOut }: WorkspaceAppPr
     setFormFeedback(null)
 
     if (taskReminder) {
+      if (!taskTime) {
+        setFormFeedback({ type: 'error', text: 'Please select a due time for reminders.' })
+        return
+      }
+      if (taskReminderMinutes.length === 0) {
+        setFormFeedback({ type: 'error', text: 'Select at least one reminder timing.' })
+        return
+      }
       try {
         if (!reminderAudioRef.current && typeof window.AudioContext !== 'undefined') {
           reminderAudioRef.current = new window.AudioContext()
         }
         if (reminderAudioRef.current?.state === 'suspended') {
-          void reminderAudioRef.current.resume()
+          void reminderAudioRef.current.resume().catch(error => {
+            console.warn('TogetherOS could not activate reminder sound:', error)
+          })
         }
       } catch (error) {
         console.warn('TogetherOS could not prepare reminder sound:', error)
       }
       if ('Notification' in window && Notification.permission === 'default') {
-        void Notification.requestPermission()
+        void Notification.requestPermission().catch(error => {
+          console.warn('TogetherOS notification permission was not granted:', error)
+        })
       }
     }
     if (!taskTitle.trim()) {
@@ -475,7 +619,7 @@ function WorkspaceApp({ userId, userEmail, userName, onSignOut }: WorkspaceAppPr
 
     if (editingTask) {
       setTasks(current => current.map(task => task.id === editingTask.id
-        ? { ...task, title: taskTitle.trim(), project: taskProject, date: taskDate, time: taskReminder ? taskTime : undefined, reminderMinutes: taskReminder ? 10 : undefined, priority: taskPriority, assignee: taskAssignee.trim() }
+        ? { ...task, title: taskTitle.trim(), project: taskProject, date: taskDate, time: taskReminder ? taskTime : undefined, reminderMinutes: taskReminder ? [...taskReminderMinutes] : undefined, priority: taskPriority, assignee: taskAssignee.trim() }
         : task))
       logActivity('Task updated', taskTitle.trim())
       setFormFeedback({ type: 'success', text: 'Task updated successfully.' })
@@ -483,7 +627,7 @@ function WorkspaceApp({ userId, userEmail, userName, onSignOut }: WorkspaceAppPr
       setTasks(current => [...current, {
         id: Date.now(), title: taskTitle.trim(), project: taskProject,
         date: taskDate, time: taskReminder ? taskTime : undefined,
-        reminderMinutes: taskReminder ? 10 : undefined,
+        reminderMinutes: taskReminder ? [...taskReminderMinutes] : undefined,
         completed: false, priority: taskPriority, assignee: taskAssignee.trim(),
       }])
       logActivity('Task created', taskTitle.trim())
@@ -500,9 +644,24 @@ function WorkspaceApp({ userId, userEmail, userName, onSignOut }: WorkspaceAppPr
   }
 
   const deleteTask = (task: Task) => {
-    if (!window.confirm(`Delete "${task.title}"?`)) return
+    if (!window.confirm(`Move "${task.title}" to Recycle Bin?`)) return
     setTasks(current => current.filter(item => item.id !== task.id))
-    logActivity('Task deleted', task.title)
+    setDeletedTasks(current => [task, ...current.filter(item => item.id !== task.id)])
+    logActivity('Task moved to Recycle Bin', task.title)
+  }
+
+  const restoreTask = (task: Task) => {
+    setTasks(current => current.some(item => item.id === task.id)
+      ? current
+      : [...current, task])
+    setDeletedTasks(current => current.filter(item => item.id !== task.id))
+    logActivity('Task restored', task.title)
+  }
+
+  const permanentlyDeleteTask = (task: Task) => {
+    if (!window.confirm(`Permanently delete "${task.title}"? This cannot be undone.`)) return
+    setDeletedTasks(current => current.filter(item => item.id !== task.id))
+    logActivity('Task permanently deleted', task.title)
   }
 
   const openNewWorkspace = () => {
@@ -628,6 +787,7 @@ function WorkspaceApp({ userId, userEmail, userName, onSignOut }: WorkspaceAppPr
   const navItems = [
     { label: 'Overview', icon: '◫' },
     { label: 'My Tasks', icon: '✓' },
+    { label: 'Recycle Bin', icon: '♲' },
     { label: 'Workspaces', icon: '▦' },
     { label: 'Calendar', icon: '▣' },
     { label: 'Activity', icon: '↗' },
@@ -747,11 +907,43 @@ function WorkspaceApp({ userId, userEmail, userName, onSignOut }: WorkspaceAppPr
           <div className="settings-note">Your profile changes are saved automatically on this device.</div>
         </div>
         <div className="panel settings-panel"><div className="panel-heading"><div><h2>Appearance</h2><p>Choose the look of your workspace.</p></div></div>
-          <div className="setting-choice"><div><strong>Dark appearance</strong><span>Use a darker interface across TogetherOS.</span></div><button className={`toggle-switch ${darkMode ? 'on' : ''}`} onClick={() => setDarkMode(value => !value)} aria-label="Toggle dark appearance"><span /></button></div>
+          <div className="setting-choice"><div><strong>Dark appearance</strong><span>Use a darker interface across KARYA.</span></div><button className={`toggle-switch ${darkMode ? 'on' : ''}`} onClick={() => setDarkMode(value => !value)} aria-label="Toggle dark appearance"><span /></button></div>
+
+          <div className="appearance-control">
+            <div><strong>Accent colour</strong><span>Choose the highlight colour for your workspace.</span></div>
+            <div className="accent-picker" role="group" aria-label="Accent colour">
+              {(['violet', 'blue', 'teal', 'rose'] as const).map(color => (
+                <button type="button" key={color}
+                  className={`accent-swatch ${color} ${accentColor === color ? 'selected' : ''}`}
+                  onClick={() => setAccentColor(color)}
+                  aria-label={`${color} accent`}
+                  aria-pressed={accentColor === color} />
+              ))}
+            </div>
+          </div>
+
+          <div className="setting-choice">
+            <div><strong>Animated background</strong><span>Subtle ambient colour movement behind your workspace.</span></div>
+            <button className={`toggle-switch ${ambientMotion ? 'on' : ''}`}
+              onClick={() => setAmbientMotion(value => !value)}
+              aria-label="Toggle animated background"><span /></button>
+          </div>
+
+          <div className="appearance-control">
+            <div><strong>Animation intensity</strong><span>Keep effects comfortable and lightweight.</span></div>
+            <div className="intensity-options">
+              {(['soft', 'balanced', 'vivid'] as const).map(level => (
+                <button type="button" key={level}
+                  className={animationIntensity === level ? 'selected' : ''}
+                  onClick={() => setAnimationIntensity(level)}>{level.charAt(0).toUpperCase() + level.slice(1)}</button>
+              ))}
+            </div>
+          </div>
+
           <div className="setting-choice"><div><strong>Local data</strong><span>Your current workspace data is stored in this browser.</span></div><span className="local-badge">On device</span></div>
         </div>
         <div className="panel settings-panel backup-panel">
-          <div className="panel-heading"><div><h2>Backup & Restore</h2><p>Keep a portable copy of your TogetherOS data.</p></div><span className="local-badge">JSON</span></div>
+          <div className="panel-heading"><div><h2>Backup & Restore</h2><p>Keep a portable copy of your KARYA data.</p></div><span className="local-badge">JSON</span></div>
           <p className="backup-description">Your backup includes tasks, workspaces, team members, activity history, profile details and appearance preferences.</p>
           <div className="backup-actions">
             <button type="button" className="primary-button" onClick={exportBackup}>↓ Export backup</button>
@@ -761,6 +953,102 @@ function WorkspaceApp({ userId, userEmail, userName, onSignOut }: WorkspaceAppPr
           <p className="backup-warning">Importing replaces the current data on this browser. Export a backup first if you may need to restore it later.</p>
           <p className="backup-message" role="status" aria-live="polite">{backupMessage || 'No backup action performed yet.'}</p>
         </div>
+
+        {window.togetherOS?.updater && <div className="panel settings-panel updater-panel">
+          <div className="panel-heading">
+            <div><h2>KARYA Update Center</h2><p>Manage desktop app updates.</p></div>
+            <span className="local-badge">DESKTOP</span>
+          </div>
+
+          <div className="updater-intro">
+            <span className="updater-icon">↻</span>
+            <div><strong>Keep KARYA up to date</strong><p>Check and install the latest available version.</p></div>
+          </div>
+
+          {updaterStatus && <div className={`updater-status updater-${updaterStatus.state}`} role="status" aria-live="polite">
+            <span className="updater-dot" />{updaterStatus.message}
+            {updaterStatus.version && <strong>v{updaterStatus.version}</strong>}
+          </div>}
+
+          {updaterStatus?.state === 'downloading' && <div className="updater-progress">
+            <div><span>Downloading</span><strong>{updaterStatus.percent ?? 0}%</strong></div>
+            <progress max="100" value={updaterStatus.percent ?? 0} />
+          </div>}
+
+          <div className="updater-actions">
+            <button type="button" className="primary-button"
+              disabled={updaterStatus?.state === 'checking' || updaterStatus?.state === 'downloading'}
+              onClick={async () => {
+                setUpdaterStatus({state:'checking', message:'Checking for updates...'})
+                try {
+                  const r = await window.togetherOS?.updater?.checkForUpdates()
+                  if (r && !r.ok) setUpdaterStatus({state:'error', message:r.message || 'Update check failed.'})
+                } catch (e) {
+                  setUpdaterStatus({state:'error', message:e instanceof Error ? e.message : 'Update check failed.'})
+                }
+              }}>
+              {updaterStatus?.state === 'checking' ? 'Checking...' : '↻ Check for updates'}
+            </button>
+
+            {updaterStatus?.state === 'available' && <button type="button" className="secondary-button"
+              onClick={async () => {
+                try {
+                  const r = await window.togetherOS?.updater?.downloadUpdate()
+                  if (r && !r.ok) setUpdaterStatus({state:'error', message:r.message || 'Download failed.'})
+                } catch (e) {
+                  setUpdaterStatus({state:'error', message:e instanceof Error ? e.message : 'Download failed.'})
+                }
+              }}>↓ Download update</button>}
+
+            {updaterStatus?.state === 'downloaded' && <button type="button" className="primary-button"
+              onClick={async () => {
+                try {
+                  const r = await window.togetherOS?.updater?.installUpdate()
+                  if (r && !r.ok) setUpdaterStatus({state:'error', message:r.message || 'Install failed.'})
+                } catch (e) {
+                  setUpdaterStatus({state:'error', message:e instanceof Error ? e.message : 'Restart failed.'})
+                }
+              }}>↻ Restart to update</button>}
+          </div>
+          <p className="updater-note">Save your work before restarting to install an update.</p>
+        </div>}
+      </section>
+    }
+
+    if (activePage === 'Recycle Bin') {
+      return <section className="panel recycle-bin-panel">
+        <div className="panel-heading">
+          <div>
+            <h2>Recycle Bin</h2>
+            <p>{deletedTasks.length} deleted task{deletedTasks.length === 1 ? '' : 's'} · Restore tasks or permanently remove them.</p>
+          </div>
+          <button type="button" className="secondary-button"
+            disabled={deletedTasks.length === 0}
+            onClick={() => {
+              if (window.confirm('Permanently delete every task in the Recycle Bin? This cannot be undone.')) {
+                setDeletedTasks([])
+              }
+            }}>Empty bin</button>
+        </div>
+        {deletedTasks.length === 0 ? (
+          <div className="empty-state">Your Recycle Bin is empty. Deleted tasks will appear here.</div>
+        ) : (
+          <div className="task-list">
+            {deletedTasks.map(task => (
+              <div className="task-row recycle-bin-row" key={task.id}>
+                <div className="task-details">
+                  <strong>{task.title}</strong>
+                  <span>{task.project} · {task.priority} priority · {formatDate(task.date)}</span>
+                </div>
+                <button type="button" className="secondary-button"
+                  onClick={() => restoreTask(task)}>↶ Restore</button>
+                <button type="button" className="more-button"
+                  aria-label={`Permanently delete ${task.title}`}
+                  onClick={() => permanentlyDeleteTask(task)}>×</button>
+              </div>
+            ))}
+          </div>
+        )}
       </section>
     }
 
@@ -868,6 +1156,101 @@ function WorkspaceApp({ userId, userEmail, userName, onSignOut }: WorkspaceAppPr
       </section>
     }
 
+    if (activePage === 'Notification Center') {
+      const unreadCount = notifications.filter(item => !item.read).length
+
+      return <section className="panel notification-center">
+        <div className="panel-heading">
+          <div>
+            <h2>Notification Center</h2>
+            <p>{unreadCount} unread notification{unreadCount === 1 ? '' : 's'} · Your recent reminders and updates.</p>
+          </div>
+          <div className="notification-center-toolbar">
+            <button
+              type="button"
+              className="secondary-button"
+              disabled={unreadCount === 0}
+              onClick={() => setNotifications(current => current.map(item => ({ ...item, read: true })))}
+            >
+              Mark all as read
+            </button>
+            <button
+              type="button"
+              className="secondary-button"
+              disabled={notifications.length === 0}
+              onClick={() => setNotifications([])}
+            >
+              Clear all
+            </button>
+          </div>
+        </div>
+
+        {notifications.length ? (
+          <div className="notification-center-list">
+            {notifications.map(item => (
+              <article
+                className={`notification-center-item ${item.read ? '' : 'notification-center-unread'}`}
+                key={item.id}
+              >
+                <span className="notification-center-icon">
+                  {item.kind === 'reminder' ? '◷' : '✦'}
+                </span>
+                <div className="notification-center-content">
+                  <strong>{item.title}</strong>
+                  <p>{item.detail}</p>
+                  <small>{new Date(item.createdAt).toLocaleString()}</small>
+                  {item.taskId !== undefined && (
+                    <button
+                      type="button"
+                      className="notification-open-task"
+                      onClick={() => {
+                        setNotifications(current => current.map(notification =>
+                          notification.id === item.id ? { ...notification, read: true } : notification
+                        ))
+                        setTaskFilter('All')
+                        setActivePage('My Tasks')
+                      }}
+                    >
+                      View tasks
+                    </button>
+                  )}
+                </div>
+                <div className="notification-center-actions">
+                  {!item.read && (
+                    <button
+                      type="button"
+                      className="notification-action-button"
+                      onClick={() => setNotifications(current => current.map(notification =>
+                        notification.id === item.id ? { ...notification, read: true } : notification
+                      ))}
+                    >
+                      Mark read
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="notification-action-button notification-delete-button"
+                    aria-label={`Delete notification: ${item.title}`}
+                    onClick={() => setNotifications(current =>
+                      current.filter(notification => notification.id !== item.id)
+                    )}
+                  >
+                    Delete
+                  </button>
+                </div>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <div className="empty-state notification-empty-state">
+            <span className="notification-empty-icon">♧</span>
+            <strong>You're all caught up!</strong>
+            <p>New task reminders and updates will appear here.</p>
+          </div>
+        )}
+      </section>
+    }
+
     if (activePage === 'Activity') {
       return <section className="panel"><div className="panel-heading"><div><h2>Activity history</h2><p>A timeline of changes in your space.</p></div></div>
         {activities.length ? activities.map(item => <div className="activity-item history-item" key={item.id}>
@@ -905,6 +1288,37 @@ function WorkspaceApp({ userId, userEmail, userName, onSignOut }: WorkspaceAppPr
               <div className="legend-total"><span>Total tasks</span><strong>{tasks.length}</strong></div>
             </div>
           </div>
+        </div>
+
+        <div className="panel analytics-panel progress-pulse-panel">
+          <div className="panel-heading">
+            <div><h2>Live progress pulse</h2><p>A visual snapshot of your current task completion.</p></div>
+            <span className="analytics-period">LIVE</span>
+          </div>
+          <div className="progress-pulse-visual" aria-label={`Current task completion: ${completion} percent`}>
+            <svg viewBox="0 0 520 150" role="img" aria-label="Decorative intersecting progress waves">
+              <defs>
+                <linearGradient id="pulseWaveOne" x1="0" x2="1">
+                  <stop offset="0%" stopColor="var(--accent)" />
+                  <stop offset="100%" stopColor="var(--accent-secondary)" />
+                </linearGradient>
+                <linearGradient id="pulseWaveTwo" x1="0" x2="1">
+                  <stop offset="0%" stopColor="#43b9b1" />
+                  <stop offset="100%" stopColor="#8d80ee" />
+                </linearGradient>
+              </defs>
+              <path className="pulse-wave pulse-wave-one" d="M0 82 C55 10 105 10 160 82 S265 154 320 82 S425 10 520 82" />
+              <path className="pulse-wave pulse-wave-two" d="M0 82 C55 145 105 145 160 82 S265 10 320 82 S425 145 520 82" />
+              <path className="pulse-wave pulse-wave-base" d="M0 82 H520" />
+            </svg>
+          </div>
+          <div className="progress-pulse-footer">
+            <div><strong>{completion}%</strong><span>Completion rate</span></div>
+            <div><strong>{dueTodayCount}</strong><span>Due today</span></div>
+            <div><strong>{upcomingTaskCount}</strong><span>Upcoming</span></div>
+          </div>
+          <div className="progress-pulse-track"><span style={{ width: `${completion}%` }} /></div>
+          <p className="progress-pulse-note">This reflects your current tasks, not a historical trend.</p>
         </div>
 
         <div className="panel analytics-panel priority-panel">
@@ -982,7 +1396,7 @@ function WorkspaceApp({ userId, userEmail, userName, onSignOut }: WorkspaceAppPr
   }
 
   return (
-    <div className={`app-shell ${darkMode ? 'dark' : ''}`}>
+    <div className={`app-shell ${darkMode ? 'dark' : ''} accent-${accentColor} ${ambientMotion ? `ambient-${animationIntensity}` : 'ambient-off'}`}>
       <aside className="sidebar">
         <button className="brand brand-button" onClick={() => {
           setActivePage('Overview')
@@ -990,7 +1404,7 @@ function WorkspaceApp({ userId, userEmail, userName, onSignOut }: WorkspaceAppPr
         }}>
           <span className="brand-mark"><span>✦</span></span>
           <span className="brand-copy">
-            <span className="brand-name">Together<span className="brand-light">OS</span></span>
+            <span className="brand-name">KARYA</span>
             <span className="brand-tagline">One space. Everything in sync.</span>
           </span>
         </button>
@@ -1078,27 +1492,90 @@ function WorkspaceApp({ userId, userEmail, userName, onSignOut }: WorkspaceAppPr
           <div className="topbar-actions">
             <label className="search-box"><span>⌕</span><input value={search} onChange={event => setSearch(event.target.value)} placeholder="Search tasks..." /><kbd>⌘ K</kbd></label>
             <div className="notification-wrap">
-              <button className="notification-button" onClick={() => {
-      setShowNotifications(value => !value)
-      setShowWorkspaceMenu(false)
-      setShowProfileMenu(false)
-    }}
-                aria-label="Toggle notifications" aria-expanded={showNotifications}>
+              <button
+                type="button"
+                className="notification-button"
+                onClick={() => {
+                  setShowNotifications(value => !value)
+                  setShowWorkspaceMenu(false)
+                  setShowProfileMenu(false)
+                }}
+                aria-label="Toggle notifications"
+                aria-expanded={showNotifications}
+              >
                 ♧
-                {activities.length > 0 && <span className="notification-dot" />}
+                {notifications.some(item => !item.read) && (
+                  <span className="notification-count">
+                    {notifications.filter(item => !item.read).length > 99
+                      ? '99+'
+                      : notifications.filter(item => !item.read).length}
+                  </span>
+                )}
               </button>
-              {showNotifications && <div className="notification-popover">
-                <div className="notification-heading">
-                  <strong>Notifications</strong>
-                  <button onClick={() => setShowNotifications(false)} aria-label="Close notifications">×</button>
-                </div>
-                {activities.length ? activities.slice(0, 5).map(item => (
-                  <div className="notification-entry" key={item.id}>
-                    <span className="notification-entry-icon">✦</span>
-                    <div><strong>{item.title}</strong><p>{item.detail}</p><small>{item.time}</small></div>
+
+              {showNotifications && (
+                <div className="notification-popover">
+                  <div className="notification-heading">
+                    <div>
+                      <strong>Notifications</strong>
+                      <small>
+                        {notifications.filter(item => !item.read).length} unread
+                      </small>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setShowNotifications(false)}
+                      aria-label="Close notifications"
+                    >
+                      ×
+                    </button>
                   </div>
-                )) : <div className="empty-state">You're all caught up.</div>}
-              </div>}
+
+                  {notifications.length ? (
+                    <>
+                      {notifications.slice(0, 5).map(item => (
+                        <button
+                          type="button"
+                          className={`notification-entry ${item.read ? '' : 'notification-entry-unread'}`}
+                          key={item.id}
+                          onClick={() => {
+                            setNotifications(current => current.map(notification =>
+                              notification.id === item.id
+                                ? { ...notification, read: true }
+                                : notification
+                            ))
+                            setShowNotifications(false)
+                            setTaskFilter('All')
+                            setActivePage(item.taskId !== undefined ? 'My Tasks' : 'Notification Center')
+                          }}
+                        >
+                          <span className="notification-entry-icon">
+                            {item.kind === 'reminder' ? '◷' : '✦'}
+                          </span>
+                          <span className="notification-entry-content">
+                            <strong>{item.title}</strong>
+                            <span>{item.detail}</span>
+                            <small>{new Date(item.createdAt).toLocaleString()}</small>
+                          </span>
+                          {!item.read && <span className="notification-unread-dot" />}
+                        </button>
+                      ))}
+                      <button
+                        type="button"
+                        className="notification-view-all"
+                        onClick={() => {
+                          setShowNotifications(false)
+                          setActivePage('Notification Center')
+                        }}
+                      >
+                        View all notifications →
+                      </button>
+                    </>
+                  ) : (
+                    <div className="empty-state">You're all caught up.</div>
+                  )}
+                </div>
+              )}
             </div>
             <div className="profile-menu-wrap">
             <button type="button" className="top-avatar"
@@ -1133,7 +1610,7 @@ function WorkspaceApp({ userId, userEmail, userName, onSignOut }: WorkspaceAppPr
             <p className="subtitle">{activePage === 'Overview' ? "Here's what's happening across your workspaces today." : `Everything you need to manage ${activePage.toLowerCase()}.`}</p>
           </div>{activePage !== 'Activity' && <button className="primary-button" onClick={activePage === 'Workspaces' ? () => setShowWorkspaceForm(true) : openNewTask}>＋ {activePage === 'Workspaces' ? 'New workspace' : 'Add task'}</button>}</section>
           {renderPage()}
-          <footer className="footer"><span>© 2026 TogetherOS</span><span>Built for better teamwork <span className="footer-heart">♥</span></span></footer>
+          <footer className="footer"><span>© 2026 KARYA</span><span>Built for better teamwork <span className="footer-heart">♥</span></span></footer>
         </div>
       </main>
 
@@ -1163,10 +1640,73 @@ function WorkspaceApp({ userId, userEmail, userName, onSignOut }: WorkspaceAppPr
             <label>Due time<input type="time" required={taskReminder} value={taskTime} onChange={event => setTaskTime(event.target.value)} /></label>
             <label>Priority<select value={taskPriority} onChange={event => setTaskPriority(event.target.value as Task['priority'])}><option>Low</option><option>Medium</option><option>High</option></select></label>
           </div>
-          <label className="reminder-toggle">
-            <input type="checkbox" checked={taskReminder} onChange={event => setTaskReminder(event.target.checked)} />
-            Remind me 10 minutes before
-          </label>
+          <div className="reminder-settings">
+            <label className="reminder-toggle">
+              <input type="checkbox" checked={taskReminder} onChange={event => setTaskReminder(event.target.checked)} />
+              Enable task reminders
+            </label>
+            {taskReminder && <>
+              <p className="reminder-hint">Choose one or more times before the task is due.</p>
+              <div className="reminder-options">
+                {[
+                  { value: 10, label: '10 minutes' },
+                  { value: 30, label: '30 minutes' },
+                  { value: 60, label: '1 hour' },
+                  { value: 120, label: '2 hours' },
+                  { value: 360, label: '6 hours' },
+                  { value: 720, label: '12 hours' },
+                  { value: 1440, label: '1 day' },
+                  { value: 2880, label: '2 days' },
+                  { value: 4320, label: '3 days' },
+                ].map(option => (
+                  <label className="reminder-option" key={option.value}>
+                    <input
+                      type="checkbox"
+                      checked={taskReminderMinutes.includes(option.value)}
+                      onChange={event => setTaskReminderMinutes(current =>
+                        event.target.checked
+                          ? [...new Set([...current, option.value])].sort((a, b) => a - b)
+                          : current.filter(value => value !== option.value)
+                      )}
+                    />
+                    {option.label}
+                  </label>
+                ))}
+              </div>
+              <div className="custom-reminder">
+                <label>Custom timing (minutes before)</label>
+                <div className="custom-reminder-controls">
+                  <input
+                    type="number"
+                    min="1"
+                    max="43200"
+                    value={customReminderMinutes}
+                    onChange={event => setCustomReminderMinutes(event.target.value)}
+                    placeholder="Enter minutes"
+                  />
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() => {
+                      const value = Number(customReminderMinutes)
+                      if (Number.isInteger(value) && value >= 1 && value <= 43200) {
+                        setTaskReminderMinutes(current => [...new Set([...current, value])].sort((a, b) => a - b))
+                      } else {
+                        setFormFeedback({ type: 'error', text: 'Enter custom minutes between 1 and 43200.' })
+                      }
+                    }}
+                  >
+                    Add
+                  </button>
+                </div>
+              </div>
+              <p className="reminder-selected">
+                Selected: {taskReminderMinutes.length
+                  ? taskReminderMinutes.map(value => value < 60 ? `${value}m` : value < 1440 ? `${value / 60}h` : `${value / 1440}d`).join(', ')
+                  : 'No timings selected'}
+              </p>
+            </>}
+          </div>
           <div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setShowTaskForm(false)}>Cancel</button><button className="primary-button" type="submit">{editingTask ? 'Save changes' : 'Create task'}</button></div>
         </form>
       </div>}
@@ -1198,6 +1738,12 @@ declare global {
   interface Window {
     togetherOS?: {
       onAuthCallback: (callback: (url: string) => void) => () => void
+      updater?: {
+        checkForUpdates: () => Promise<{ok:boolean; message?:string}>
+        downloadUpdate: () => Promise<{ok:boolean; message?:string}>
+        installUpdate: () => Promise<{ok:boolean; message?:string}>
+        onStatus: (callback: (status: UpdaterStatus) => void) => () => void
+      }
     }
   }
 }
@@ -1293,8 +1839,8 @@ function AuthScreen() {
     <main className="auth-screen">
       <section className="auth-card">
         <div className="auth-brand">
-          <span className="auth-brand-mark">t</span>
-          <span>together<span className="auth-brand-light">os</span></span>
+          <span className="auth-brand-mark">K</span>
+          <span>KARYA</span>
         </div>
 
         <div className="auth-heading">
@@ -1355,7 +1901,7 @@ function AuthScreen() {
 
           <button className="auth-submit" type="submit" disabled={busy}>
             {busy ? 'Please wait...' :
-             mode === 'login' ? 'Sign in to TogetherOS' :
+             mode === 'login' ? 'Sign in to KARYA' :
              mode === 'signup' ? 'Create your account' : 'Send reset link'}
             {!busy && <span>→</span>}
           </button>
@@ -1382,7 +1928,7 @@ function AuthScreen() {
         )}
 
         <p className="auth-footer">
-          By continuing, you agree to use TogetherOS responsibly with your team.
+          By continuing, you agree to use KARYA responsibly with your team.
         </p>
       </section>
       <div className="auth-decoration auth-decoration-one" />
@@ -1417,8 +1963,8 @@ function ResetPasswordScreen({ onDone }: { onDone: () => void }) {
     <main className="auth-screen">
       <section className="auth-card">
         <div className="auth-brand">
-          <span className="auth-brand-mark">t</span>
-          <span>together<span className="auth-brand-light">os</span></span>
+          <span className="auth-brand-mark">K</span>
+          <span>KARYA</span>
         </div>
         <div className="auth-heading">
           <span className="auth-eyebrow">ACCOUNT SECURITY</span>

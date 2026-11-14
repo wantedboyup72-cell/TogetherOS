@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.119.0",
+    "electron-updater": "^6.8.11",
     "react": "^19.3.1",
     "react-dom": "^19.3.1"
   },
@@ -32,7 +33,7 @@
   "main": "electron/main.cjs",
   "build": {
     "appId": "com.togetheros.desktop",
-    "productName": "TogetherOS",
+    "productName": "KARYA",
     "asar": true,
     "directories": {
       "output": "release"
@@ -52,7 +53,7 @@
           ]
         }
       ],
-      "artifactName": "TogetherOS-Setup-${version}.${ext}",
+      "artifactName": "KARYA-Setup-${version}.${ext}",
       "icon": "build/icon.ico"
     },
     "nsis": {
@@ -61,7 +62,7 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "TogetherOS"
+      "shortcutName": "KARYA"
     },
     "protocols": [
       {
@@ -69,6 +70,14 @@
         "schemes": [
           "togetheros"
         ]
+      }
+    ],
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "wantedboyup72-cell",
+        "repo": "TogetherOS",
+        "releaseType": "release"
       }
     ]
   }
