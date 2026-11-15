@@ -12,7 +12,7 @@ let pendingAuthUrl = process.argv.find(value => value.startsWith('togetheros://'
 let updateDownloaded = false
 
 autoUpdater.autoDownload = false
-autoUpdater.autoInstallOnAppQuit = true
+autoUpdater.autoInstallOnAppQuit = false
 autoUpdater.allowPrerelease = false
 
 function sendUpdateStatus(status) {

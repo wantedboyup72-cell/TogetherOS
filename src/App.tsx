@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import heroImage from './assets/hero.png'
 import type { FormEvent } from 'react'
 import type { Session } from '@supabase/supabase-js'
 import { supabase } from './lib/supabase'
@@ -271,12 +272,37 @@ function WorkspaceApp({ userId, userEmail, userName, onSignOut }: WorkspaceAppPr
   const [profileEmail, setProfileEmail] = useState(() => readSaved(storageKey('togetheros-profile-email'), userEmail))
   const [backupMessage, setBackupMessage] = useState('')
   const [updaterStatus, setUpdaterStatus] = useState<UpdaterStatus | null>(null)
+  const [updateDismissed, setUpdateDismissed] = useState(false)
 
   useEffect(() => {
     const updater = window.togetherOS?.updater
     if (!updater) return
     return updater.onStatus(setUpdaterStatus)
   }, [])
+
+  useEffect(() => {
+    const updater = window.togetherOS?.updater
+    if (!updater) return
+
+    const timer = window.setTimeout(() => {
+      void updater.checkForUpdates().then(result => {
+        if (result && !result.ok) {
+          setUpdaterStatus({
+            state: 'error',
+            message: result.message || 'Could not check for updates.'
+          })
+        }
+      }).catch(error => {
+        setUpdaterStatus({
+          state: 'error',
+          message: error instanceof Error ? error.message : 'Update check failed.'
+        })
+      })
+    }, 1200)
+
+    return () => window.clearTimeout(timer)
+  }, [])
+
   const [currentDateKey] = useState(() => getDateKey(new Date()))
   const [calendarMonth, setCalendarMonth] = useState(() => {
     const now = new Date()
@@ -954,64 +980,7 @@ function WorkspaceApp({ userId, userEmail, userName, onSignOut }: WorkspaceAppPr
           <p className="backup-message" role="status" aria-live="polite">{backupMessage || 'No backup action performed yet.'}</p>
         </div>
 
-        {window.togetherOS?.updater && <div className="panel settings-panel updater-panel">
-          <div className="panel-heading">
-            <div><h2>KARYA Update Center</h2><p>Manage desktop app updates.</p></div>
-            <span className="local-badge">DESKTOP</span>
-          </div>
 
-          <div className="updater-intro">
-            <span className="updater-icon">↻</span>
-            <div><strong>Keep KARYA up to date</strong><p>Check and install the latest available version.</p></div>
-          </div>
-
-          {updaterStatus && <div className={`updater-status updater-${updaterStatus.state}`} role="status" aria-live="polite">
-            <span className="updater-dot" />{updaterStatus.message}
-            {updaterStatus.version && <strong>v{updaterStatus.version}</strong>}
-          </div>}
-
-          {updaterStatus?.state === 'downloading' && <div className="updater-progress">
-            <div><span>Downloading</span><strong>{updaterStatus.percent ?? 0}%</strong></div>
-            <progress max="100" value={updaterStatus.percent ?? 0} />
-          </div>}
-
-          <div className="updater-actions">
-            <button type="button" className="primary-button"
-              disabled={updaterStatus?.state === 'checking' || updaterStatus?.state === 'downloading'}
-              onClick={async () => {
-                setUpdaterStatus({state:'checking', message:'Checking for updates...'})
-                try {
-                  const r = await window.togetherOS?.updater?.checkForUpdates()
-                  if (r && !r.ok) setUpdaterStatus({state:'error', message:r.message || 'Update check failed.'})
-                } catch (e) {
-                  setUpdaterStatus({state:'error', message:e instanceof Error ? e.message : 'Update check failed.'})
-                }
-              }}>
-              {updaterStatus?.state === 'checking' ? 'Checking...' : '↻ Check for updates'}
-            </button>
-
-            {updaterStatus?.state === 'available' && <button type="button" className="secondary-button"
-              onClick={async () => {
-                try {
-                  const r = await window.togetherOS?.updater?.downloadUpdate()
-                  if (r && !r.ok) setUpdaterStatus({state:'error', message:r.message || 'Download failed.'})
-                } catch (e) {
-                  setUpdaterStatus({state:'error', message:e instanceof Error ? e.message : 'Download failed.'})
-                }
-              }}>↓ Download update</button>}
-
-            {updaterStatus?.state === 'downloaded' && <button type="button" className="primary-button"
-              onClick={async () => {
-                try {
-                  const r = await window.togetherOS?.updater?.installUpdate()
-                  if (r && !r.ok) setUpdaterStatus({state:'error', message:r.message || 'Install failed.'})
-                } catch (e) {
-                  setUpdaterStatus({state:'error', message:e instanceof Error ? e.message : 'Restart failed.'})
-                }
-              }}>↻ Restart to update</button>}
-          </div>
-          <p className="updater-note">Save your work before restarting to install an update.</p>
-        </div>}
       </section>
     }
 
@@ -1397,6 +1366,121 @@ function WorkspaceApp({ userId, userEmail, userName, onSignOut }: WorkspaceAppPr
 
   return (
     <div className={`app-shell ${darkMode ? 'dark' : ''} accent-${accentColor} ${ambientMotion ? `ambient-${animationIntensity}` : 'ambient-off'}`}>
+
+        {window.togetherOS?.updater &&
+          !updateDismissed &&
+          updaterStatus &&
+          ['available', 'downloading', 'downloaded', 'error'].includes(updaterStatus.state) && (
+          <div className="karya-update-overlay" role="dialog" aria-modal="true"
+               aria-labelledby="karya-update-title">
+            <div className="karya-update-card">
+              <div className="karya-update-topline">
+                <span className="karya-update-brand">KARYA</span>
+                <span className="karya-update-version">
+                  {updaterStatus.version ? `VERSION ${updaterStatus.version}` : 'DESKTOP UPDATE'}
+                </span>
+              </div>
+
+              <div className="karya-update-gallery">
+                <div className="karya-update-image karya-update-image-main">
+                  <img src={heroImage} alt="KARYA application preview" />
+                  <span className="karya-image-caption">A better workspace</span>
+                </div>
+                <div className="karya-update-image karya-update-art-purple">
+                  <span className="karya-art-symbol">✦</span>
+                  <strong>FOCUS</strong>
+                  <small>Everything in sync</small>
+                </div>
+                <div className="karya-update-image karya-update-art-blue">
+                  <span className="karya-art-symbol">↗</span>
+                  <strong>PROGRESS</strong>
+                  <small>Make every task count</small>
+                </div>
+              </div>
+
+              <div className="karya-update-copy">
+                <span className="karya-update-eyebrow">
+                  {updaterStatus.state === 'error' ? 'UPDATE CHECK' : 'A NEW EXPERIENCE'}
+                </span>
+                <h2 id="karya-update-title">
+                  {updaterStatus.state === 'available' ? 'Update available!' :
+                   updaterStatus.state === 'downloading' ? 'Updating KARYA...' :
+                   updaterStatus.state === 'downloaded' ? 'Update is ready!' :
+                   'Update unavailable'}
+                </h2>
+                <p>
+                  {updaterStatus.state === 'available'
+                    ? 'A new version of KARYA is ready. Update whenever you are ready.'
+                    : updaterStatus.state === 'downloading'
+                    ? 'Please wait while the update is downloaded.'
+                    : updaterStatus.state === 'downloaded'
+                    ? 'The download is complete. Restart KARYA to install the update.'
+                    : updaterStatus.message}
+                </p>
+              </div>
+
+              {updaterStatus.state === 'downloading' && (
+                <div className="karya-update-progress">
+                  <div>
+                    <span>Downloading update</span>
+                    <strong>{Math.round(updaterStatus.percent ?? 0)}%</strong>
+                  </div>
+                  <progress max="100" value={updaterStatus.percent ?? 0} />
+                </div>
+              )}
+
+              <div className="karya-update-actions">
+                {updaterStatus.state === 'available' && (
+                  <button type="button" className="karya-update-primary"
+                    onClick={async () => {
+                      try {
+                        const result = await window.togetherOS?.updater?.downloadUpdate()
+                        if (result && !result.ok) {
+                          setUpdaterStatus({state:'error', message:result.message || 'Download failed.'})
+                        }
+                      } catch (error) {
+                        setUpdaterStatus({
+                          state:'error',
+                          message:error instanceof Error ? error.message : 'Download failed.'
+                        })
+                      }
+                    }}>
+                    UPDATE <span>↓</span>
+                  </button>
+                )}
+
+                {updaterStatus.state === 'downloaded' && (
+                  <button type="button" className="karya-update-primary"
+                    onClick={async () => {
+                      try {
+                        const result = await window.togetherOS?.updater?.installUpdate()
+                        if (result && !result.ok) {
+                          setUpdaterStatus({state:'error', message:result.message || 'Install failed.'})
+                        }
+                      } catch (error) {
+                        setUpdaterStatus({
+                          state:'error',
+                          message:error instanceof Error ? error.message : 'Restart failed.'
+                        })
+                      }
+                    }}>
+                    RESTART & INSTALL <span>↗</span>
+                  </button>
+                )}
+
+                {updaterStatus.state !== 'downloading' && (
+                  <button type="button" className="karya-update-later"
+                    onClick={() => setUpdateDismissed(true)}>
+                    LATER
+                  </button>
+                )}
+              </div>
+              <p className="karya-update-footnote">
+                You stay in control. Nothing downloads or installs until you choose.
+              </p>
+            </div>
+          </div>
+        )}
       <aside className="sidebar">
         <button className="brand brand-button" onClick={() => {
           setActivePage('Overview')

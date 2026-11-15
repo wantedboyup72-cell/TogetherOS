@@ -78,6 +78,10 @@ jobs:
           fs.writeFileSync("release/latest.yml", metadata);
           NODE
 
+          if ! gh release view "v${VERSION}" >/dev/null 2>&1; then
+            gh release create "v${VERSION}" --title "KARYA v${VERSION}" --notes "KARYA v${VERSION} Windows release."
+          fi
+
           gh release upload "v${VERSION}" \
             "$INSTALLER" \
             "${INSTALLER}.blockmap" \
